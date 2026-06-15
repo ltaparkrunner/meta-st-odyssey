@@ -1,9 +1,12 @@
 # How To Start
+# This project is a custom fork of the official [Seeed-Studio/meta-st-odyssey](https://github.comSeeed-Studio/meta-st-odyssey.git) repository. 
+
+# It has been modified to include build support for the Raspberry Pi 7-inch MIPI DSI Touchscreen Display (including custom kernel drivers, Device Tree updates for `stm32mp157c-odyssey.dts`, and mandatory Kconfig features).
 
 ## 1. Clone repositories
 
 ```bash
-git clone https://github.com/Seeed-Studio/meta-st-odyssey.git -b openstlinux-6.1-yocto-mickledore
+git clone https://github.com/ltaparkrunner/meta-st-odyssey.git -b openstlinux-6.1-yocto-mickledore
 git clone https://gerrit.googlesource.com/git-repo
 ./git-repo/repo init -u https://github.com/STMicroelectronics/oe-manifest.git -b refs/tags/openstlinux-6.1-yocto-mickledore-mpu-v24.06.26
 ./git-repo/repo sync

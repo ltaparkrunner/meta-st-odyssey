@@ -1,0 +1,399 @@
+From b3846269bc7fb6bd323c4b4d937dc153ef397d13 Mon Sep 17 00:00:00 2001
+From: ltaparkrunner <ltaparkrunner@egmail.com>
+Date: Sun, 14 Jun 2026 01:10:17 +0300
+Subject: [PATCH] drivers: drm: stm: add patches for raspberrypi 7-inch DSI
+ display
+
+---
+ arch/arm/boot/dts/stm32mp157c-odyssey.dts | 118 +++++++++++++++++++++-
+ drivers/gpu/drm/drm_of.c                  |  58 +++++++++++
+ drivers/gpu/drm/panel/panel-simple.c      |  33 +++++-
+ drivers/gpu/drm/stm/ltdc.c                |   8 +-
+ drivers/of/property.c                     |  37 +++++++
+ include/drm/drm_of.h                      |   5 +
+ include/linux/of_graph.h                  |   2 +
+ 7 files changed, 254 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm/boot/dts/stm32mp157c-odyssey.dts b/arch/arm/boot/dts/stm32mp157c-odyssey.dts
+index ca5fc9bb5..dc523bbd6 100644
+--- a/arch/arm/boot/dts/stm32mp157c-odyssey.dts
++++ b/arch/arm/boot/dts/stm32mp157c-odyssey.dts
+@@ -54,15 +54,46 @@ phy0: ethernet-phy@7 { /* KSZ9031RN */
+ 	};
+ };
+ 
++&pinctrl {
++	u-boot,dm-pre-reloc;
++
++	i2c1_pins_mx: i2c1_mx-0 {
++		pins {
++			pinmux = <STM32_PINMUX('F', 14, AF5)>, /* I2C1_SCL */
++				<STM32_PINMUX('F', 15, AF5)>; /* I2C1_SDA */
++			bias-disable;
++			drive-open-drain;
++			slew-rate = <0>;
++		};
++	};
++
++	i2c1_sleep_pins_mx: i2c1_sleep_mx-0 {
++		pins {
++			pinmux = <STM32_PINMUX('F', 14, ANALOG)>, /* I2C1_SCL */
++			<STM32_PINMUX('F', 15, ANALOG)>; /* I2C1_SDA */
++		};
++	};
++};
++
+ &i2c1 {
+ 	pinctrl-names = "default", "sleep";
+-	pinctrl-0 = <&i2c1_pins_a>;
+-	pinctrl-1 = <&i2c1_sleep_pins_a>;
++	pinctrl-0 = <&i2c1_pins_mx>;
++	pinctrl-1 = <&i2c1_sleep_pins_mx>;
+ 	i2c-scl-rising-time-ns = <100>;
+ 	i2c-scl-falling-time-ns = <7>;
+-	status = "okay";
+ 	/delete-property/dmas;
+ 	/delete-property/dma-names;
++
++	#address-cells = <1>;
++	#size-cells = <0>;
++	status = "okay";
++
++	reg_display: reg_display@45 {
++		compatible = "raspberrypi,7inch-touchscreen-panel-regulator";
++		reg = <0x45>;
++		gpio-controller;
++		#gpio-cells = <2>;
++	};
+ };
+ 
+ &sdmmc1 {
+@@ -86,3 +117,84 @@ &uart4 {
+ 	status = "okay";
+ };
+ 
++
++&dsi {
++	#address-cells = <1>;
++	#size-cells = <0>;
++	status = "okay";
++	ports{
++		#address-cells = <1>;
++		#size-cells = <0>;
++		port@0 {
++			reg = <0>;
++			dsi_in:endpoint{
++				remote-endpoint = <&ltdc_ep0_out>;
++			};
++		};
++		port@1 {
++			reg = <1>;
++			dsi_out: endpoint {
++				remote-endpoint = <&bridge_in>;
++			};
++		};
++	};
++	bridge@0 {
++		reg = <0>;
++		compatible = "toshiba,tc358762";
++		vddc-supply = <&reg_bridge>;
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				bridge_in: endpoint {
++					remote-endpoint = <&dsi_out>;
++				};
++			};
++
++			port@1 {
++				reg = <1>;
++				bridge_out: endpoint {
++					remote-endpoint = <&panel_in>;
++				};
++			};
++		};
++	};
++};
++
++&ltdc {
++	status = "okay";
++
++	port {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		ltdc_ep0_out: endpoint@0 {
++			reg = <0>;
++			remote-endpoint = <&dsi_in>;
++		};
++	};
++};
++
++/ {
++	panel_disp1: panel_disp1 {
++		compatible = "raspberrypi,7inch-dsi", "simple-panel";
++		backlight = <&reg_display>;
++		power-supply = <&reg_display>;
++
++		port {
++			panel_in: endpoint {
++				remote-endpoint = <&bridge_out>;
++			};
++		};
++	};
++
++	reg_bridge: reg_bridge {
++		compatible = "regulator-fixed";
++		regulator-name = "bridge_reg";
++		gpio = <&reg_display 0 0>;
++		vin-supply = <&reg_display>;
++		enable-active-high;
++	};
++};
+diff --git a/drivers/gpu/drm/drm_of.c b/drivers/gpu/drm/drm_of.c
+index 7bbcb999b..511ceb35d 100644
+--- a/drivers/gpu/drm/drm_of.c
++++ b/drivers/gpu/drm/drm_of.c
+@@ -284,6 +284,64 @@ int drm_of_find_panel_or_bridge(const struct device_node *np,
+ }
+ EXPORT_SYMBOL_GPL(drm_of_find_panel_or_bridge);
+ 
++
++///////////////////////////////////
++int drm_of_find_panel_or_bridge_2(const struct device_node *np,
++				int port, int endpoint,
++				struct drm_panel **panel,
++				struct drm_bridge **bridge,
++                struct device *dev)
++{
++	int ret = -EPROBE_DEFER;
++	struct device_node *remote;
++
++	if (!panel && !bridge)
++		return -EINVAL;
++	if (panel)
++		*panel = NULL;
++
++	/*
++	 * of_graph_get_remote_node() produces a noisy error message if port
++	 * node isn't found and the absence of the port is a legit case here,
++	 * so at first we silently check whether graph presents in the
++	 * device-tree node.
++	 */
++	if (!of_graph_is_present(np)) {
++        dev_err(dev, "drm_of_find_panel_or_bridge_2 !of_graph_is_present(np)");
++		return -ENODEV;
++    }
++	remote = of_graph_get_remote_node_2(np, port, endpoint, dev);
++    dev_err(dev, "drm_of_find_panel_or_bridge_2 after of_graph_get_remote_node");
++	if (!remote)
++		return -ENODEV;
++
++	if (panel) {
++		*panel = of_drm_find_panel(remote);
++		if (!IS_ERR(*panel))
++			ret = 0;
++		else
++			*panel = NULL;
++	}
++
++	/* No panel found yet, check for a bridge next. */
++	if (bridge) {
++		if (ret) {
++			*bridge = of_drm_find_bridge(remote);
++			if (*bridge)
++				ret = 0;
++		} else {
++			*bridge = NULL;
++		}
++
++	}
++
++	of_node_put(remote);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(drm_of_find_panel_or_bridge_2);
++//////////////////////////////////
++
++
+ enum drm_of_lvds_pixels {
+ 	DRM_OF_LVDS_EVEN = BIT(0),
+ 	DRM_OF_LVDS_ODD = BIT(1),
+diff --git a/drivers/gpu/drm/panel/panel-simple.c b/drivers/gpu/drm/panel/panel-simple.c
+index 92401e1f5..9330943b3 100644
+--- a/drivers/gpu/drm/panel/panel-simple.c
++++ b/drivers/gpu/drm/panel/panel-simple.c
+@@ -527,7 +527,7 @@ static int panel_dpi_probe(struct device *dev,
+ 	desc->connector_type = DRM_MODE_CONNECTOR_DPI;
+ 
+ 	panel->desc = desc;
+-
++	dev_err(dev, "panel_dpi_probe fin\n");
+ 	return 0;
+ }
+ 
+@@ -3222,6 +3222,32 @@ static const struct panel_desc qishenglong_gopher2b_lcd = {
+ 	.bus_flags = DRM_BUS_FLAG_DE_HIGH | DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE,
+ 	.connector_type = DRM_MODE_CONNECTOR_DPI,
+ };
++ 
++static const struct drm_display_mode raspberrypi_7inch_mode = {
++	.clock = 30000,
++	.hdisplay = 800,
++	.hsync_start = 800 + 131,
++	.hsync_end = 800 + 131 + 2,
++	.htotal = 800 + 131 + 2 + 45,
++	.vdisplay = 480,
++	.vsync_start = 480 + 7,
++	.vsync_end = 480 + 7 + 2,
++	.vtotal = 480 + 7 + 2 + 22,
++	.flags = DRM_MODE_FLAG_NVSYNC | DRM_MODE_FLAG_NHSYNC,
++};
++
++static const struct panel_desc raspberrypi_7inch = {
++	.modes = &raspberrypi_7inch_mode,
++	.num_modes = 1,
++	.bpc = 8,
++	.size = {
++		.width = 154,
++		.height = 86,
++	},
++	.bus_format = MEDIA_BUS_FMT_RGB888_1X24,
++//	.connector_type = DRM_MODE_CONNECTOR_DSI,
++    .connector_type = DRM_MODE_CONNECTOR_DPI,
++};
+ 
+ static const struct display_timing rocktech_rk070er9427_timing = {
+ 	.pixelclock = { 26400000, 33300000, 46800000 },
+@@ -4255,6 +4281,9 @@ static const struct of_device_id platform_of_match[] = {
+ 	}, {
+ 		.compatible = "qishenglong,gopher2b-lcd",
+ 		.data = &qishenglong_gopher2b_lcd,
++	}, {
++		.compatible = "raspberrypi,7inch-dsi",
++		.data = &raspberrypi_7inch,
+ 	}, {
+ 		.compatible = "rocktech,rk070er9427",
+ 		.data = &rocktech_rk070er9427,
+@@ -4665,7 +4694,7 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
+ 
+ 		drm_panel_remove(&panel->base);
+ 	}
+-
++	dev_err(&dsi->dev, "panel_simple_dsi_probe fin\n");
+ 	return err;
+ }
+ 
+diff --git a/drivers/gpu/drm/stm/ltdc.c b/drivers/gpu/drm/stm/ltdc.c
+index 2be0b1a48..0dcb6e816 100644
+--- a/drivers/gpu/drm/stm/ltdc.c
++++ b/drivers/gpu/drm/stm/ltdc.c
+@@ -2387,8 +2387,10 @@ int ltdc_load(struct drm_device *ddev)
+ 
+ 	/* Get endpoints if any */
+ 	for (i = 0; i < nb_endpoints; i++) {
+-		ret = drm_of_find_panel_or_bridge(np, 0, i, &panel, &bridge);
+-
++		ret = drm_of_find_panel_or_bridge_2(np, 0, i, &panel, &bridge, dev);
++        if (ret == -ENODEV) 
++            dev_err(dev, "ltdc_load after drm_of_find_panel_or_bridge: -ENODEV");
++        else dev_err(dev, "ltdc_load after drm_of_find_panel_or_bridge: %d, ret");
+ 		/*
+ 		 * If at least one endpoint is -ENODEV, continue probing,
+ 		 * else if at least one endpoint returned an error
+@@ -2400,6 +2402,7 @@ int ltdc_load(struct drm_device *ddev)
+ 			return ret;
+ 
+ 		if (panel) {
++			dev_err(dev, "ltdc_load after panel was found, connector_type: %d", panel->connector_type);
+ 			bridge = drm_panel_bridge_add_typed(panel,
+ 							    DRM_MODE_CONNECTOR_DPI);
+ 			if (IS_ERR(bridge)) {
+@@ -2410,6 +2413,7 @@ int ltdc_load(struct drm_device *ddev)
+ 		}
+ 
+ 		if (bridge) {
++			dev_err(dev, "ltdc_load after bridge was found, type: %d", bridge->type);
+ 			ret = ltdc_encoder_init(ddev, bridge);
+ 			if (ret) {
+ 				if (ret != -EPROBE_DEFER)
+diff --git a/drivers/of/property.c b/drivers/of/property.c
+index da5d71219..6e461e173 100644
+--- a/drivers/of/property.c
++++ b/drivers/of/property.c
+@@ -863,6 +863,43 @@ struct device_node *of_graph_get_remote_node(const struct device_node *node,
+ }
+ EXPORT_SYMBOL(of_graph_get_remote_node);
+ 
++///////////////////////////////////////////////////////
++
++struct device_node *of_graph_get_remote_node_2(const struct device_node *node,
++					     u32 port, u32 endpoint, struct device *dev)
++{
++	struct device_node *endpoint_node, *remote;
++	dev_err(dev, "of_graph_get_remote_node_2 start\n");
++	endpoint_node = of_graph_get_endpoint_by_regs(node, port, endpoint);
++	if (!endpoint_node) {
++		pr_debug("no valid endpoint (%d, %d) for node %pOF\n",
++			 port, endpoint, node);
++        dev_err(dev, "no valid endpoint (%d, %d) for node %pOF\n",
++			 port, endpoint, node);
++		return NULL;
++	}
++
++	remote = of_graph_get_remote_port_parent(endpoint_node);
++	of_node_put(endpoint_node);
++	if (!remote) {
++		pr_debug("no valid remote node\n");
++        dev_err(dev, "no valid remote node\n");
++		return NULL;
++	}
++
++	if (!of_device_is_available(remote)) {
++		pr_debug("not available for remote node\n");
++        dev_err(dev, "not available for remote node\n");
++		of_node_put(remote);
++		return NULL;
++	}
++	dev_err(dev, "of_graph_get_remote_node_2 fin\n");
++	return remote;
++}
++EXPORT_SYMBOL(of_graph_get_remote_node_2 );
++
++////////////////////////////////////////////
++
+ static struct fwnode_handle *of_fwnode_get(struct fwnode_handle *fwnode)
+ {
+ 	return of_fwnode_handle(of_node_get(to_of_node(fwnode)));
+diff --git a/include/drm/drm_of.h b/include/drm/drm_of.h
+index 10ab58c40..aaed0c6bc 100644
+--- a/include/drm/drm_of.h
++++ b/include/drm/drm_of.h
+@@ -47,6 +47,11 @@ int drm_of_find_panel_or_bridge(const struct device_node *np,
+ 				int port, int endpoint,
+ 				struct drm_panel **panel,
+ 				struct drm_bridge **bridge);
++int drm_of_find_panel_or_bridge_2(const struct device_node *np,
++				int port, int endpoint,
++				struct drm_panel **panel,
++				struct drm_bridge **bridge,
++                struct device *dev);
+ int drm_of_lvds_get_dual_link_pixel_order(const struct device_node *port1,
+ 					  const struct device_node *port2);
+ int drm_of_lvds_get_data_mapping(const struct device_node *port);
+diff --git a/include/linux/of_graph.h b/include/linux/of_graph.h
+index 4d7756087..7d29c85e0 100644
+--- a/include/linux/of_graph.h
++++ b/include/linux/of_graph.h
+@@ -55,6 +55,8 @@ struct device_node *of_graph_get_remote_port_parent(
+ struct device_node *of_graph_get_remote_port(const struct device_node *node);
+ struct device_node *of_graph_get_remote_node(const struct device_node *node,
+ 					     u32 port, u32 endpoint);
++struct device_node *of_graph_get_remote_node_2(const struct device_node *node,
++					     u32 port, u32 endpoint, struct device *dev);
+ #else
+ 
+ static inline bool of_graph_is_present(const struct device_node *node)
