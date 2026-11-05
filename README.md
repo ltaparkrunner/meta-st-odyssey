@@ -33,28 +33,38 @@ chmod +x run-docker.sh
 Initialize the OpenSTLinux build configuration environment:
 
 ```bash
-DISTRO=openstlinux-weston MACHINE=stm32mp1 source layers/meta-st/scripts/envsetup.sh
+# Move build dependencies to the root workspace
+mv meta-st-odyssey/layers ./layers
+mv meta-st-odyssey/git-repo ./git-repo
+
+# Place the meta-st-odyssey layer inside the new layers directory
+mv meta-st-odyssey ./layers/
+
+# Initialize the OpenSTLinux build environment
+EULA_APPROVED="1" DISTRO=openstlinux-weston MACHINE=stm32mp1 source layers/meta-st/scripts/envsetup.sh
 ```
 
 ### 3.5. Configure Git Identity (Mandatory)
 
 Some recipes (like `openocd-stm32mp-native`) execute `git commit` commands internally during their configuration stage. Since BitBake isolates environment variables within tasks, you **must** append your Git identity directly to the Yocto configuration.
 
-Open the automatically generated configuration file:
+Since text editors like `nano` or `vim` are not pre-installed inside the minimal Docker image, run the following command directly in the container terminal to automatically append your credentials to the configuration file. 
+
+**Make sure to replace the placeholder values with your actual Git credentials before executing the command:**
+
 ```bash
-nano conf/local.conf
-```
+cat << 'EOF' >> conf/local.conf
 
-Append the following lines to the end of the file. **Make sure to change the placeholder values ("User", "user@example.com") to your actual Git credentials:**
-
-```bitbake
 # Export Git Identity for BitBake tasks isolation
 export GIT_AUTHOR_NAME = "Your Actual Name"
 export GIT_AUTHOR_EMAIL = "your.email@example.com"
 export GIT_COMMITTER_NAME = "Your Actual Name"
 export GIT_COMMITTER_EMAIL = "your.email@example.com"
+EOF
 ```
-*(Alternatively, if you want this to apply automatically across all setups, you can add these identical lines to your layer configuration file `conf/layer.conf` instead).*
+
+*(Alternatively, you can open `conf/local.conf` from your host machine's graphical text editor, since the workspace directory is shared with the container via Docker volumes).*
+
 
 ## 4. Add custom meta-layers
 
@@ -62,7 +72,7 @@ Add the cloned layer extensions into your BitBake configuration:
 
 ```bash
 bitbake-layers add-layer ../layers/meta-qt6
-bitbake-layers add-layer ../meta-st-odyssey
+bitbake-layers add-layer ../layers/meta-st-odyssey
 ```
 
 ## 5. Build project
