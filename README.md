@@ -107,3 +107,12 @@ Alternatively, export the environment variable globally in `/etc/profile` on the
 export QT_QPA_PLATFORM=wayland
 ```
 
+## Hardware and Results
+
+### Connection Diagram
+![Connection Diagram](images/connection.jpg)
+
+### Working Screen Examples
+![Working Screen 1](images/screen1.jpg)
+![Working Screen 2](images/screen2.jpg)
+
